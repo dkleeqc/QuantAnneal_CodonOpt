@@ -112,7 +112,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         qq_coefficients = (2*wp['c_GC'] / self.N**2) * sigma_ij
         q_coefficients = (wp['c_GC'] / self.N**2) * square_s_i - 2 * (wp['rho_T'] * wp['c_GC'] / self.N) * s_i
         const = wp['c_GC'] * (wp['rho_T']**2)
-        self.H_GC = [qq_coefficients, q_coefficients, const]
+        self.H_GC = [q_coefficients, qq_coefficients, const]
 
         "Minimizing sequentially repeated nucleotides term"
         self.H_R = wp['c_R'] * self.matrix_R()
@@ -120,9 +120,12 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         "Additional constraints"
         self.H_p = [(-1)*wp['epsilon']*np.ones(self.N), self.matrix_tau(wp['infty'])]
 
-        self.Q_ii = self.H_f + q_coefficients + self.H_p[0]
+        "Conservation of the length of polypeptide"
+        self.H_L = [wp['c_L'] * self.matrix_L()[0], wp['c_L'] * self.matrix_L()[1]]
 
-        self.Q_ij = qq_coefficients + self.H_R + self.H_p[1]
+        self.Q_ii = self.H_f + q_coefficients + self.H_p[0] + self.H_L[0]
+
+        self.Q_ij = qq_coefficients + self.H_R + self.H_p[1] + self.H_L[1]
 
     "codon_usage_frequency"
     def vec_zeta(self, host='e_coli_316407', epsilon_f=0.0001):
@@ -182,6 +185,14 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
             tau[t:t+l,t:t+l] = infty
             t += l
         return np.triu(tau - np.diag(np.diag(tau)))
+
+
+    def matrix_L(self):
+        l = self.len_aa_seq
+        diag_L = (1/(l**2) - 2/l) * np.ones(self.N)
+        offdiag_L = np.ones((self.N,self.N))
+        offdiag_L = 2/(l**2) * (np.triu(offdiag_L) - np.diag(np.diag(offdiag_L)))
+        return [diag_L, offdiag_L]
 
 
     def _repeated_sequential_nucleotides(self, Ci, Cj):
