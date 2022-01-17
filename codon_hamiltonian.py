@@ -1,9 +1,24 @@
 import functools
 from itertools import groupby
 import operator
+from collections import defaultdict
+
 import numpy as np
 
+#python codon table
 import python_codon_tables as pct
+
+#CAI library
+from CAI import CAI
+import Bio.Data.CodonTable as ct
+
+#D-wave oceans
+from dwave.system.samplers import DWaveSampler
+from dwave.system.composites import EmbeddingComposite
+
+
+
+
 
 class Amino_acid_to_Codon():
     def __init__(self, amino_acid_seq):
@@ -16,9 +31,14 @@ class Amino_acid_to_Codon():
         self.N = len(_to_list(self.list_all_possible_codons)) 
 
     
-    def __call__(self):        
-        return self.list_all_possible_codons
-    
+    def __call__(self, selection=None):        
+        if selection == None:
+            return self.list_all_possible_codons
+        else:
+            #flattening
+            flattening_all_possible_codons = sum(self.list_all_possible_codons, [])
+            res_codon_frag = [flattening_all_possible_codons[i] for i in selection]
+            return res_codon_frag
 
     def to_possible_codons(self, amino_acids=None):
         all_possible_codons = []
@@ -82,10 +102,10 @@ class Amino_acid_to_Codon():
         return all_possible_codons
 
 
-
     def in_dna_base(self):
         return [[c.replace('U', 'T') for c in aa] for aa in self.list_all_possible_codons] # c: codon, aa: amino acid
     
+
 
 
 
@@ -102,6 +122,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
                 codon_freq = 
                 counts_GC = 
         """
+
         "codon_usage_frequency term"
         self.H_f = wp['c_f'] * (-1) * self.vec_zeta(epsilon_f=wp['epsilon_f'])
 
@@ -203,7 +224,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         outcome = np.max(list_counts.astype('int'))
         return outcome ** 2 - 1
 
-
+    "BQM to Ising"
     def Q_to_Jh(self):
         offdiag = self.Q_ij
         diag = self.Q_ii
@@ -226,8 +247,57 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
 
         return J, h, shift
 
+    "matrix_Q to dict_Q"
+    def get_Q_dict(self):
+        Q = dict()
+        for i in range(len(self.Q_ii)):
+            for j in range(i, len(self.Q_ii)):
+                if i == j:
+                    Q[(i,i)] = self.Q_ii[i]
+                else:
+                    Q[(i,j)] = self.Q_ij[i,j]
+        return Q
 
 
+    def run_Dwave(self, chain_strength=17, num_runs=10000):
+        Q = self.get_Q_dict()
+
+        sampler = EmbeddingComposite(DWaveSampler())
+        self.response = sampler.sample_qubo(Q,
+                                chain_strength=chain_strength,
+                                num_reads=num_runs,
+                                #num_spin_reversal_tramsforms=50,
+                                label='Codon_Hamiltonian')
+
+        return self._get_min_res()
+
+    
+    def _get_min_res(self):
+        # Pick minimum Energy and its index
+        min_E = min(list(self.response.data(fields=['energy'])))[0]
+        min_index = list(self.response.data(fields=['energy'])).index(min_E)
+        # Pick a sample associated with min Energy
+        min_sample = list(self.response.data(fields=['sample']))[min_index][0]
+        min_sample = [k for k,v in min_sample.items() if v == 1]
+        
+        return min_sample, min_E
+
+
+    def opt_codon_seq(self, base='RNA'):
+        min_sample, _ = self._get_min_res()
+        #flattening
+        flattening_all_possible_codons = sum(self.list_all_possible_codons, [])
+
+        if base == 'RNA':
+            res_codon_frag = [flattening_all_possible_codons[i] for i in min_sample]
+
+        elif base == 'DNA':
+            res_codon_frag = [flattening_all_possible_codons[i].replace("U", "T") for i in min_sample]
+
+        return res_codon_frag
+        
+
+        
 
 
 class Quantum_Ising():
@@ -282,8 +352,8 @@ class Quantum_Ising():
             return eigenvec[:,:degeneracy+1].transpose()
 
 
-
-
+def fragmenting_amino_acid_seq(Amino_acid_seq, length_frag, ith):
+    return Amino_acid_seq[length_frag * (ith):length_frag * (ith+1)]
 
 
 def vec_to_braket(vec):
@@ -306,12 +376,153 @@ def vec_to_braket(vec):
     return res
 
 
-
-
 def _to_list(list_of_list):
     return functools.reduce(operator.concat, list_of_list)
 
 
-def _codon_table_to_list(host):
-    codon_table = pct.get_codons_table(host)
+
+
+
+
+
+"""
+Codon Adaption Index
+"""
+
+
+def getFlatPct(organ="ecoli"):
+    if organ == "ecoli":
+        table = pct.get_codons_table("e_coli_316407")
+    elif organ == "human":
+        table = pct.get_codons_table("h_sapiens_9606")
+
+    tableForCAI={}
+    for key in table.keys():
+        for key2 in table[key].keys():
+            tableForCAI[key2] = table[key][key2]
+    return tableForCAI
+
+
+def get_synonymous_codons(genetic_code_dict):
+
+    # invert the genetic code dictionary to map each amino acid to its codons
+    codons_for_amino_acid = {}
+    for codon, amino_acid in genetic_code_dict.items():
+        codons_for_amino_acid[amino_acid] = codons_for_amino_acid.get(amino_acid, [])
+        codons_for_amino_acid[amino_acid].append(codon)
+
+    # create dictionary of synonymous codons
+    # Example: {'CTT': ['CTT', 'CTG', 'CTA', 'CTC', 'TTA', 'TTG'], 'ATG': ['ATG']...}
+    return {
+        codon: codons_for_amino_acid[genetic_code_dict[codon]]
+        for codon in genetic_code_dict.keys()
+    }
+
+
+def get_RSCU_from_ctable(ctable, genetic_code=1): # genetic_code : ncbi_codon_table id ;  1 : standard
+    _synonymous_codons = {
+    k: get_synonymous_codons(v.forward_table) for k, v in ct.unambiguous_dna_by_id.items()
+    }
+    _non_synonymous_codons = {
+        k: {codon for codon in v.keys() if len(v[codon]) == 1}
+        for k, v in _synonymous_codons.items()
+    }
+
+    synonymous_codons = _synonymous_codons[genetic_code]
+    counts = ctable
+    result={}
+    
+    # calculate RSCU values
+    for codon in ct.unambiguous_dna_by_id[genetic_code].forward_table:
+        result[codon] = counts[codon] / (
+            (len(synonymous_codons[codon]) ** -1)
+            * (sum((counts[_codon] for _codon in synonymous_codons[codon])))
+        )
+
+    return result
+
+
+
+
+
+
+
+
+
+
+class CAIs():
+    def __init__(self, organ="ecoli"):
+        self.organ = organ
+        self.rscu_organ = self.get_RSCU_from_ctable()
+
+
+    def __call__(self, codon_seq):
+        codon_seq = self.check_basis(codon_seq)
+        return CAI(codon_seq, RSCUs=self.rscu_organ)
+
+
+    def getFlatPct(self):
+        if self.organ == "ecoli":
+            table = pct.get_codons_table("e_coli_316407")
+        elif self.organ == "human":
+            table = pct.get_codons_table("h_sapiens_9606")
+
+        tableForCAI={}
+        for key in table.keys():
+            for key2 in table[key].keys():
+                tableForCAI[key2] = table[key][key2]
+        return tableForCAI
+
+
+    def get_RSCU_from_ctable(self, genetic_code=1): # genetic_code : ncbi_codon_table id ;  1 : standard
+        ctable = self.getFlatPct()
+
+        _synonymous_codons = {
+        k: self._get_synonymous_codons(v.forward_table) for k, v in ct.unambiguous_dna_by_id.items()
+        }
+        _non_synonymous_codons = {
+            k: {codon for codon in v.keys() if len(v[codon]) == 1}
+            for k, v in _synonymous_codons.items()
+        }
+
+        synonymous_codons = _synonymous_codons[genetic_code]
+        counts = ctable
+        result={}
+        
+        # calculate RSCU values
+        for codon in ct.unambiguous_dna_by_id[genetic_code].forward_table:
+            result[codon] = counts[codon] / (
+                (len(synonymous_codons[codon]) ** -1)
+                * (sum((counts[_codon] for _codon in synonymous_codons[codon])))
+            )
+
+        return result
+
+
+    def _get_synonymous_codons(self, genetic_code_dict):
+
+        # invert the genetic code dictionary to map each amino acid to its codons
+        codons_for_amino_acid = {}
+        for codon, amino_acid in genetic_code_dict.items():
+            codons_for_amino_acid[amino_acid] = codons_for_amino_acid.get(amino_acid, [])
+            codons_for_amino_acid[amino_acid].append(codon)
+
+        # create dictionary of synonymous codons
+        # Example: {'CTT': ['CTT', 'CTG', 'CTA', 'CTC', 'TTA', 'TTG'], 'ATG': ['ATG']...}
+        return {
+            codon: codons_for_amino_acid[genetic_code_dict[codon]]
+            for codon in genetic_code_dict.keys()
+        }
+
+
+
+
+    
+    def check_basis(self, codon_seq):
+        try:
+            codon_seq.index("T")
+        except ValueError:
+            codon_seq = codon_seq.replace("U", "T")
+
+        return codon_seq
 
