@@ -107,6 +107,11 @@ class Amino_acid_to_Codon():
     
 
 
+def fragmenting_amino_acid_seq(Amino_acid_seq, length_frag, ith):
+    return Amino_acid_seq[length_frag * (ith):length_frag * (ith+1)]
+
+
+
 
 
 class Codon_Hamiltonian(Amino_acid_to_Codon):
@@ -283,7 +288,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         return min_sample, min_E
 
 
-    def opt_codon_seq(self, base='RNA'):
+    def outcome_codon_seq(self, base='RNA'):
         min_sample, _ = self._get_min_res()
         #flattening
         flattening_all_possible_codons = sum(self.list_all_possible_codons, [])
@@ -297,7 +302,54 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         return res_codon_frag
         
 
-        
+
+class Run_whole_seq(Codon_Hamiltonian):
+    def __init__(self, amino_acid_seq, wp, block_size=5, verbose=0):
+        super().__init__(amino_acid_seq, wp)
+
+        self.aminoacid_block = []
+        self.dwave_opt_codons = []
+        self.min_E_list = []
+
+        for ith in range(len(amino_acid_seq) // block_size + 1):
+            amino_fragment = fragmenting_amino_acid_seq(amino_acid_seq, block_size, ith)
+            codon_fragment = Amino_acid_to_Codon(amino_fragment)
+
+            
+            if verbose >= 1:
+                print('In amino acide seq, Run Block:',str(ith))
+                print('=> Amino acids:', amino_fragment)
+            if verbose >= 2:
+                print('=> All possible codons:', codon_fragment())
+
+            #run Dwave Sampler
+            min_sample, min_E = super().run_Dwave() #chain_strength=15
+            opt_codon_frag = super().outcome_codon_seq()
+            
+            if verbose >= 2:
+                print('=> Ground states:', min_sample)
+            if verbose >= 1:
+                print('=> Optimal codons:', opt_codon_frag)
+
+            self.aminoacid_block.append(amino_fragment)
+            self.dwave_opt_codons.append(opt_codon_frag)
+            self.min_E_list.append(min_E)
+
+
+    def save_n_dp_outcome(self, DNA_name):
+        return
+
+
+
+def load_codon_seq(name, bs, wp):
+    #bs: bloch_size
+
+    #wp: weight params
+    return
+
+
+
+
 
 
 class Quantum_Ising():
@@ -337,43 +389,60 @@ class Quantum_Ising():
         return np.kron(np.eye(2**(i-1)), np.kron(self.Z, np.eye(2**(self.L-i))))
 
 
-    def ExactDiag(self):
+    def run_ExactDiag(self):
         #eigenval, eigenvec = eigsh(Model, k=1, which='SA')
         eigenval, eigenvec = np.linalg.eigh(self.hamiltonian)
         # real ground-state energy
-        self.GE= eigenval[0] + self.shift
+        self.ground_energy= eigenval[0] + self.shift
         
         # Check the ground-state degeneracy
         degeneracy = np.where(np.isclose(eigenval[0], eigenval))[0][-1]
 
         if degeneracy == 0: 
-            return eigenvec[:,0]
+            self.ground_state = eigenvec[:,0]
         else:
-            return eigenvec[:,:degeneracy+1].transpose()
+            self.groun_state = eigenvec[:,:degeneracy+1].transpose()
 
 
-def fragmenting_amino_acid_seq(Amino_acid_seq, length_frag, ith):
-    return Amino_acid_seq[length_frag * (ith):length_frag * (ith+1)]
+    def outcome_codon_seq(self, ):
+        
+
+        #flattening
+        flattening_all_possible_codons = sum(self.list_all_possible_codons, [])
+
+        if base == 'RNA':
+            res_codon_frag = [flattening_all_possible_codons[i] for i in min_sample]
+
+        elif base == 'DNA':
+            res_codon_frag = [flattening_all_possible_codons[i].replace("U", "T") for i in min_sample]
+
+        return res_codon_frag
 
 
-def vec_to_braket(vec):
-    
-    """
-    vector to braket
+    def get_outcome(self, types='bracket'):
+        vec = self.ground_state
+        
+        """
+        vector to braket
 
-    input: state vector as an array
-    output: printing quantum states in bra-ket notation
-    """
-    
-    num_qb = int(np.log(len(vec))/np.log(2))
-    
-    index_nonzero = np.where(np.isclose(vec, 0) == False)[0]
-    res = dict()
-    for s in index_nonzero:
-        sigfig =bin(s)[2:]
-        res['|'+'0'*(num_qb-len(sigfig)) + sigfig +'>'] = vec[s]
-    
-    return res
+        input: state vector as an array
+        output: printing quantum states in bra-ket notation
+        """
+        
+        num_qb = int(np.log(len(vec))/np.log(2))
+        
+        index_nonzero = np.where(np.isclose(vec, 0) == False)[0]
+        res = dict()
+        for s in index_nonzero:
+            sigfig =bin(s)[2:]
+            res_binary = '0'*(num_qb-len(sigfig)) + sigfig 
+            res['|'+res_binary+'>'] = vec[s]
+        
+        if types != 'bracket':
+            res = [i for i,val in enumerate(res_binary) if val=='1']
+
+        return res
+
 
 
 def _to_list(list_of_list):
