@@ -401,7 +401,7 @@ class Quantum_Ising():
         if degeneracy == 0: 
             self.ground_state = eigenvec[:,0]
         else:
-            self.groun_state = eigenvec[:,:degeneracy+1].transpose()
+            self.ground_state = eigenvec[:,:degeneracy+1].transpose()
 
 
     def outcome_codon_seq(self, ):
@@ -448,6 +448,28 @@ class Quantum_Ising():
 def _to_list(list_of_list):
     return functools.reduce(operator.concat, list_of_list)
 
+
+def vec_to_braket(vec, types='bracket'):
+    """
+    vector to braket
+
+    input: state vector as an array
+    output: printing quantum states in bra-ket notation
+    """
+    
+    num_qb = int(np.log(len(vec))/np.log(2))
+    
+    index_nonzero = np.where(np.isclose(vec, 0) == False)[0]
+    res = dict()
+    for s in index_nonzero:
+        sigfig =bin(s)[2:]
+        res_binary = '0'*(num_qb-len(sigfig)) + sigfig 
+        res['|'+res_binary+'>'] = vec[s]
+    
+    if types != 'bracket':
+        res = [i for i,val in enumerate(res_binary) if val=='1']
+
+    return res
 
 
 
