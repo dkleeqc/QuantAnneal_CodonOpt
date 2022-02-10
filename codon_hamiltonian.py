@@ -1,4 +1,5 @@
 import functools
+import os
 from itertools import groupby
 import operator
 from collections import defaultdict
@@ -11,6 +12,9 @@ import python_codon_tables as pct
 #CAI library
 from CAI import CAI
 import Bio.Data.CodonTable as ct
+
+# GC
+from Bio.SeqUtils import GC
 
 #D-wave oceans
 from dwave.system.samplers import DWaveSampler
@@ -129,14 +133,16 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         """
 
         "codon_usage_frequency term"
-        self.H_f = wp['c_f'] * (-1) * self.vec_zeta(epsilon_f=wp['epsilon_f'])
+        self.H_f = wp['c_f'] * (-1) * self.vec_zeta(epsilon_f=0) # wp['epsilon_f']
 
         "Optimizing GC concentration term"
+        self.L = 3 * self.len_aa_seq # the length of the codon sequence
+
         s_i = self.vec_s()
         sigma_ij, square_s_i = self.matrix_ss()
 
-        qq_coefficients = (2*wp['c_GC'] / self.N**2) * sigma_ij
-        q_coefficients = (wp['c_GC'] / self.N**2) * square_s_i - 2 * (wp['rho_T'] * wp['c_GC'] / self.N) * s_i
+        qq_coefficients = (2*wp['c_GC'] / self.L**2) * sigma_ij
+        q_coefficients = (wp['c_GC'] / self.L**2) * square_s_i - 2 * (wp['rho_T'] * wp['c_GC'] / self.L) * s_i
         const = wp['c_GC'] * (wp['rho_T']**2)
         self.H_GC = [q_coefficients, qq_coefficients, const]
 
@@ -146,12 +152,9 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         "Additional constraints"
         self.H_p = [(-1)*wp['epsilon']*np.ones(self.N), self.matrix_tau(wp['infty'])]
 
-        "Conservation of the length of polypeptide"
-        self.H_L = [wp['c_L'] * self.matrix_L()[0], wp['c_L'] * self.matrix_L()[1]]
+        self.Q_ii = self.H_f + q_coefficients + self.H_p[0]
 
-        self.Q_ii = self.H_f + q_coefficients + self.H_p[0] + self.H_L[0]
-
-        self.Q_ij = qq_coefficients + self.H_R + self.H_p[1] + self.H_L[1]
+        self.Q_ij = qq_coefficients + self.H_R + self.H_p[1]
 
     "codon_usage_frequency"
     def vec_zeta(self, host='e_coli_316407', epsilon_f=0.0001):
@@ -213,14 +216,6 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         return np.triu(tau - np.diag(np.diag(tau)))
 
 
-    def matrix_L(self):
-        l = self.len_aa_seq
-        diag_L = (1/(l**2) - 2/l) * np.ones(self.N)
-        offdiag_L = np.ones((self.N,self.N))
-        offdiag_L = 2/(l**2) * (np.triu(offdiag_L) - np.diag(np.diag(offdiag_L)))
-        return [diag_L, offdiag_L]
-
-
     def _repeated_sequential_nucleotides(self, Ci, Cj):
         input = Ci + Cj
         groups = groupby(input)
@@ -269,35 +264,71 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
 
         sampler = EmbeddingComposite(DWaveSampler())
         self.response = sampler.sample_qubo(Q,
-                                chain_strength=chain_strength,
+                                #chain_strength=chain_strength,
                                 num_reads=num_runs,
                                 #num_spin_reversal_tramsforms=50,
                                 label='Codon_Hamiltonian')
 
         return self._get_min_res()
 
+
+    def _get_min_res1(self):
+        min_E = min(self.response.data(fields=['energy']))[0]
     
-    def _get_min_res(self):
-        # Pick minimum Energy and its index
-        min_E = min(list(self.response.data(fields=['energy'])))[0]
-        min_index = list(self.response.data(fields=['energy'])).index(min_E)
-        # Pick a sample associated with min Energy
-        min_sample = list(self.response.data(fields=['sample']))[min_index][0]
-        min_sample = [k for k,v in min_sample.items() if v == 1]
-        
-        return min_sample, min_E
+        min_indices = []
+        for i, x in enumerate(self.response.data(fields=['energy'])):
+            if x == min_E:
+                min_indices.append(i) 
+            else: 
+                break
+
+        sample_list = np.array(list(self.response.data(fields=['sample'])))[:,0]
+        min_sample_list = sample_list[min_indices]
+
+        min_samples = []
+        for x in min_indices.tolist():
+            a_min_sample = [k for k,v in min_sample_list[x].items() if v == 1]
+            if a_min_sample not in min_samples: #remove duplicates of min_sample
+                min_samples.append(a_min_sample) 
+
+        return min_samples, min_E
+
+
+    def _get_min_res(self): #more effective for memory usage
+        min_E = min(self.response.data(fields=['energy']))[0]
+
+        min_indices = []
+        for i, x in enumerate(self.response.data(fields=['energy'])):
+            if x == min_E:
+                min_indices.append(i) 
+            else: 
+                break
+
+        min_samples = []
+        i_min = 0
+        for x in self.response.data(fields=['sample']):
+            a_min_sample = [k for k,v in x[0].items() if v == 1]
+            if a_min_sample not in min_samples: #remove duplicates of min_sample
+                min_samples.append(a_min_sample) 
+                
+            if i_min == min_indices[-1]:
+                break
+            else:
+                i_min += 1
+
+        return min_samples, min_E
 
 
     def outcome_codon_seq(self, base='RNA'):
-        min_sample, _ = self._get_min_res()
+        min_samples, _ = self._get_min_res()
         #flattening
         flattening_all_possible_codons = sum(self.list_all_possible_codons, [])
 
         if base == 'RNA':
-            res_codon_frag = [flattening_all_possible_codons[i] for i in min_sample]
+            res_codon_frag = [[flattening_all_possible_codons[i] for i in c] for c in min_samples]
 
         elif base == 'DNA':
-            res_codon_frag = [flattening_all_possible_codons[i].replace("U", "T") for i in min_sample]
+            res_codon_frag = [[flattening_all_possible_codons[i].replace("U", "T") for i in c] for c in min_samples]
 
         return res_codon_frag
         
@@ -337,6 +368,7 @@ class Run_whole_seq(Codon_Hamiltonian):
 
 
     def save_n_dp_outcome(self, DNA_name):
+        
         return
 
 
@@ -348,7 +380,9 @@ def load_codon_seq(name, bs, wp):
     return
 
 
+def save_outcomes(DNA_name, bs, wp):
 
+    return
 
 
 
@@ -419,8 +453,8 @@ class Quantum_Ising():
         return res_codon_frag
 
 
-    def get_outcome(self, types='bracket'):
-        vec = self.ground_state
+    def get_outcome(self, types='braket'):
+        vecs = self.ground_state
         
         """
         vector to braket
@@ -428,18 +462,25 @@ class Quantum_Ising():
         input: state vector as an array
         output: printing quantum states in bra-ket notation
         """
-        
-        num_qb = int(np.log(len(vec))/np.log(2))
-        
-        index_nonzero = np.where(np.isclose(vec, 0) == False)[0]
-        res = dict()
-        for s in index_nonzero:
-            sigfig =bin(s)[2:]
-            res_binary = '0'*(num_qb-len(sigfig)) + sigfig 
-            res['|'+res_binary+'>'] = vec[s]
-        
-        if types != 'bracket':
-            res = [i for i,val in enumerate(res_binary) if val=='1']
+
+        if len(vecs.shape) == 1:
+            vecs = np.expand_dims(vecs, axis=0)
+            
+
+        res = dict() if types == 'braket' else []
+        for vec in vecs:
+            num_qb = int(np.log(len(vec))/np.log(2))
+
+            index_nonzero = np.where(np.isclose(vec, 0) == False)[0]
+
+            for s in index_nonzero:
+                sigfig =bin(s)[2:]
+                res_binary = '0'*(num_qb-len(sigfig)) + sigfig 
+
+            if types == 'braket':
+                res['|'+res_binary+'>'] = vec[s]
+            else:
+                res.append([i for i,val in enumerate(res_binary) if val=='1'])
 
         return res
 
@@ -476,61 +517,6 @@ def vec_to_braket(vec, types='bracket'):
 
 
 
-"""
-Codon Adaption Index
-"""
-
-
-def getFlatPct(organ="ecoli"):
-    if organ == "ecoli":
-        table = pct.get_codons_table("e_coli_316407")
-    elif organ == "human":
-        table = pct.get_codons_table("h_sapiens_9606")
-
-    tableForCAI={}
-    for key in table.keys():
-        for key2 in table[key].keys():
-            tableForCAI[key2] = table[key][key2]
-    return tableForCAI
-
-
-def get_synonymous_codons(genetic_code_dict):
-
-    # invert the genetic code dictionary to map each amino acid to its codons
-    codons_for_amino_acid = {}
-    for codon, amino_acid in genetic_code_dict.items():
-        codons_for_amino_acid[amino_acid] = codons_for_amino_acid.get(amino_acid, [])
-        codons_for_amino_acid[amino_acid].append(codon)
-
-    # create dictionary of synonymous codons
-    # Example: {'CTT': ['CTT', 'CTG', 'CTA', 'CTC', 'TTA', 'TTG'], 'ATG': ['ATG']...}
-    return {
-        codon: codons_for_amino_acid[genetic_code_dict[codon]]
-        for codon in genetic_code_dict.keys()
-    }
-
-
-def get_RSCU_from_ctable(ctable, genetic_code=1): # genetic_code : ncbi_codon_table id ;  1 : standard
-    _synonymous_codons = {
-    k: get_synonymous_codons(v.forward_table) for k, v in ct.unambiguous_dna_by_id.items()
-    }
-    _non_synonymous_codons = {
-        k: {codon for codon in v.keys() if len(v[codon]) == 1}
-        for k, v in _synonymous_codons.items()
-    }
-
-    synonymous_codons = _synonymous_codons[genetic_code]
-    counts = ctable
-    result={}
-    
-    # calculate RSCU values
-    for codon in ct.unambiguous_dna_by_id[genetic_code].forward_table:
-        result[codon] = counts[codon] / (
-            (len(synonymous_codons[codon]) ** -1)
-            * (sum((counts[_codon] for _codon in synonymous_codons[codon])))
-        )
-
-    return result
 
 
 
@@ -617,3 +603,11 @@ class CAIs():
 
         return codon_seq
 
+
+
+
+def GC_average(codons):
+    if type(codons) == list:
+        return [GC(c) for c in codons]
+    else:
+        return GC(codons)
