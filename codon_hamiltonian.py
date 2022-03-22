@@ -2,9 +2,11 @@ import functools
 import os
 from itertools import groupby
 import operator
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
 #python codon table
 import python_codon_tables as pct
@@ -12,6 +14,7 @@ import python_codon_tables as pct
 #CAI library
 from CAI import CAI
 import Bio.Data.CodonTable as ct
+from Bio.Seq import Seq
 
 # GC
 from Bio.SeqUtils import GC
@@ -20,7 +23,8 @@ from Bio.SeqUtils import GC
 from dwave.system.samplers import DWaveSampler
 from dwave.system.composites import EmbeddingComposite
 
-
+from dwave.system import LeapHybridCQMSampler
+from dimod import Binary, ConstrainedQuadraticModel
 
 
 
@@ -111,6 +115,8 @@ class Amino_acid_to_Codon():
     
 
 
+
+
 def fragmenting_amino_acid_seq(Amino_acid_seq, length_frag, ith):
     return Amino_acid_seq[length_frag * (ith):length_frag * (ith+1)]
 
@@ -119,45 +125,17 @@ def fragmenting_amino_acid_seq(Amino_acid_seq, length_frag, ith):
 
 
 class Codon_Hamiltonian(Amino_acid_to_Codon):
-    def __init__(self, amino_acid_seq, wp):
+    def __init__(self, amino_acid_seq, weight_params):
         Amino_acid_to_Codon.__init__(self, amino_acid_seq)
         # wp: weight_params c_f, c_GC, c_R
+        self.wp = weight_params
 
-        """
-        codon_freqs = []
-        counts_GC = []
-        for aa in range(self.len_aa_seq):
-            for c in codon_seq_in_dna_base[aa]:
-                codon_freq = 
-                counts_GC = 
-        """
+        # the length of the codon sequence
+        self.L = 3 * self.len_aa_seq 
 
-        "codon_usage_frequency term"
-        self.H_f = wp['c_f'] * (-1) * self.vec_zeta(epsilon_f=0) # wp['epsilon_f']
-
-        "Optimizing GC concentration term"
-        self.L = 3 * self.len_aa_seq # the length of the codon sequence
-
-        s_i = self.vec_s()
-        sigma_ij, square_s_i = self.matrix_ss()
-
-        qq_coefficients = (2*wp['c_GC'] / self.L**2) * sigma_ij
-        q_coefficients = (wp['c_GC'] / self.L**2) * square_s_i - 2 * (wp['rho_T'] * wp['c_GC'] / self.L) * s_i
-        const = wp['c_GC'] * (wp['rho_T']**2)
-        self.H_GC = [q_coefficients, qq_coefficients, const]
-
-        "Minimizing sequentially repeated nucleotides term"
-        self.H_R = wp['c_R'] * self.matrix_R()
-
-        "Additional constraints"
-        self.H_p = [(-1)*wp['epsilon']*np.ones(self.N), self.matrix_tau(wp['infty'])]
-
-        self.Q_ii = self.H_f + q_coefficients + self.H_p[0]
-
-        self.Q_ij = qq_coefficients + self.H_R + self.H_p[1]
 
     "codon_usage_frequency"
-    def vec_zeta(self, host='e_coli_316407', epsilon_f=0.0001):
+    def vec_zeta(self, host='e_coli_316407', epsilon_f=0):
         codon_table = pct.get_codons_table(host)
         codon_seq_in_dna_base = self.in_dna_base()
 
@@ -165,6 +143,26 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
 
         flattening_codon_freq = np.array(_to_list(self.codon_freq))
         return np.log(flattening_codon_freq)
+
+
+    def matrix_CPS(self, host='ecoli'):
+        matrix = np.zeros((self.N, self.N))
+
+        codon_list = self.in_dna_base()
+        position_i = 0
+        position_j = len(codon_list[0])
+        for x in range(self.len_aa_seq-1):
+            for a in range(len(codon_list[x])): # 
+                for b in range(len(codon_list[x+1])): # 
+                    #print(codon_list[x][a], codon_list[x+1][b])
+                    #print(position_i+a, position_j+b)
+                    codon_pair = codon_list[x][a] + codon_list[x+1][b]
+                    matrix[position_i+a, position_j+b] = self._cps(codon_pair, host)
+            
+            position_i += len(codon_list[x])
+            position_j += len(codon_list[x+1])
+
+        return matrix
 
 
     "for GC_contents_term"
@@ -216,6 +214,11 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         return np.triu(tau - np.diag(np.diag(tau)))
 
 
+    def _cps(self, codon_pair, host):
+        pcpt = pd.read_csv('./CodonPair_jhlee/CPS_'+host+'.csv')
+        return pcpt[pcpt['CodonPair'] == codon_pair]['CPS'].values[0]
+
+
     def _repeated_sequential_nucleotides(self, Ci, Cj):
         input = Ci + Cj
         groups = groupby(input)
@@ -224,10 +227,51 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         outcome = np.max(list_counts.astype('int'))
         return outcome ** 2 - 1
 
+
+    "---------- BQM with DWaveSampler ----------"
+    def H_bqm(self, weight_params=None):
+        wp = self.wp if weight_params==None else weight_params
+        
+        "codon_usage_frequency term"
+        self.H_f = wp['c_f'] * (-1) * self.vec_zeta(epsilon_f=0) # wp['epsilon_f']
+
+        "Optimizing GC concentration term"
+        s_i = self.vec_s()
+        sigma_ij, square_s_i = self.matrix_ss()
+
+        qq_coefficients = (2*wp['c_GC'] / self.L**2) * sigma_ij
+        q_coefficients = (wp['c_GC'] / self.L**2) * square_s_i - 2 * (wp['rho_T'] * wp['c_GC'] / self.L) * s_i
+        const = wp['c_GC'] * (wp['rho_T']**2)
+        self.H_GC = [q_coefficients, qq_coefficients, const]
+
+        "Minimizing sequentially repeated nucleotides term"
+        self.H_R = wp['c_R'] * self.matrix_R()
+
+        "Additional constraints"
+        self.H_p = [(-1)*wp['epsilon']*np.ones(self.N), self.matrix_tau(wp['infty'])]
+
+        Q_ii = self.H_f + q_coefficients + self.H_p[0]
+
+        Q_ij = qq_coefficients + self.H_R + self.H_p[1]
+
+        return Q_ii, Q_ij
+
+
+    "matrix_Q to dict_Q"
+    def get_Q_dict(self):
+        Q_ii, Q_ij = self.H_bqm()
+        Q = dict()
+        for i in range(len(Q_ii)):
+            for j in range(i, len(Q_ii)):
+                if i == j:
+                    Q[(i,i)] = Q_ii[i]
+                else:
+                    Q[(i,j)] = Q_ij[i,j]
+        return Q
+
     "BQM to Ising"
     def Q_to_Jh(self):
-        offdiag = self.Q_ij
-        diag = self.Q_ii
+        diag, offdiag = self.H_bqm()
 
         J = np.zeros((offdiag.shape))
         h = np.zeros(diag.shape)
@@ -247,17 +291,6 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
 
         return J, h, shift
 
-    "matrix_Q to dict_Q"
-    def get_Q_dict(self):
-        Q = dict()
-        for i in range(len(self.Q_ii)):
-            for j in range(i, len(self.Q_ii)):
-                if i == j:
-                    Q[(i,i)] = self.Q_ii[i]
-                else:
-                    Q[(i,j)] = self.Q_ij[i,j]
-        return Q
-
 
     def run_Dwave(self, chain_strength=17, num_runs=10000):
         Q = self.get_Q_dict()
@@ -270,28 +303,6 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
                                 label='Codon_Hamiltonian')
 
         return self._get_min_res()
-
-
-    def _get_min_res1(self):
-        min_E = min(self.response.data(fields=['energy']))[0]
-    
-        min_indices = []
-        for i, x in enumerate(self.response.data(fields=['energy'])):
-            if x == min_E:
-                min_indices.append(i) 
-            else: 
-                break
-
-        sample_list = np.array(list(self.response.data(fields=['sample'])))[:,0]
-        min_sample_list = sample_list[min_indices]
-
-        min_samples = []
-        for x in min_indices.tolist():
-            a_min_sample = [k for k,v in min_sample_list[x].items() if v == 1]
-            if a_min_sample not in min_samples: #remove duplicates of min_sample
-                min_samples.append(a_min_sample) 
-
-        return min_samples, min_E
 
 
     def _get_min_res(self): #more effective for memory usage
@@ -333,6 +344,103 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         return res_codon_frag
         
 
+    "---------- CQM with LeapHybridCQMSolver ----------"
+    def H_cqm(self, weight_params=None):
+        cqm = ConstrainedQuadraticModel()
+        wp = self.wp if weight_params==None else weight_params
+        #weight_params = {'c_f': 0.01, 'c_GC': 10, 'c_R': 0.01, 'rho_T': 0.6}
+
+        # Objective
+        # 1. codon usage bias
+        var_q = [Binary(f'q_{i}') for i in range(self.N)]
+        cub_ec_obj = sum((-1) * self.vec_zeta(host='e_coli_316407') * var_q)
+        cub_hu_obj = sum((-1) * self.vec_zeta(host='h_sapiens_9606') * var_q)
+
+        # 2. codon pair usage bias
+        mat_ec = self.matrix_CPS(host='ecoli')
+        mat_hu = self.matrix_CPS(host='human')
+        nonzeros = np.argwhere(mat_ec)
+        cpub_ec_obj = 0
+        cpub_hu_obj = 0
+        for pos in nonzeros:
+            i,j = pos
+            cpub_ec_obj -= mat_ec[i,j] * var_q[i] * var_q[j]
+            cpub_hu_obj -= mat_hu[i,j] * var_q[i] * var_q[j]
+
+        # 3. repeated nucleotide sequence
+        R = self.matrix_R()
+        nonzeros = np.argwhere(R)
+        rep_nuc_obj = 0
+        for pos in nonzeros:
+            i,j = pos
+            rep_nuc_obj += R[i,j] * var_q[i] * var_q[j]
+
+        cqm.set_objective(wp['cub_ec']*cub_ec_obj + wp['cub_hu']*cub_hu_obj \
+                    + wp['cpub_ec']*cpub_ec_obj + wp['cpub_hu']*cpub_hu_obj + wp['rep_nuc']*rep_nuc_obj)
+
+        # Constraint 1
+        N_accumulated = 0
+        for aa in range(self.len_aa_seq):
+            #print('amino acid:',aa)
+            
+            # the number of codons per amino acid
+            num_c_per_aa = len(self.list_all_possible_codons[aa])
+
+            # Constraints per amino acid
+            one_amino_acid = [var_q[i] for i in range(N_accumulated, N_accumulated+num_c_per_aa)]
+
+            # Add Constraints
+            cqm.add_constraint(sum(one_amino_acid) == 1, label=f'Codon Selection in position {aa}, "{self.amino_acid_seq[aa]}"')
+                
+            # the cumulative number of all possible codons
+            N_accumulated += num_c_per_aa
+
+        # Constraint 2
+        gc_avg_constraint = sum(self.vec_s() * var_q) / self.L
+        rho_T = wp['rho_T']
+        bound = wp['B_rho']
+        # Inequality Constraint for GC avg
+        cqm.add_constraint(gc_avg_constraint - rho_T <= bound, label=f'upper bound of GC average: {rho_T}')
+        cqm.add_constraint(gc_avg_constraint - rho_T >= - bound, label=f'lower bound of GC average: {rho_T}')
+        # Equality Constraint for GC avg
+        #cqm.add_constraint(gc_avg_constraint == rho_T, label=f'GC average: {rho_T}')
+        return cqm
+
+
+    def run_Hybrid(self, base='RNA'):
+        sampler = LeapHybridCQMSampler()
+        cqm = self.H_cqm()
+
+        sampleset = sampler.sample_cqm(cqm,
+                                #time_limit=20,    
+                                label="Codon CQM")
+        feasible_sampleset = sampleset.filter(lambda row: row.is_feasible)
+        if len(feasible_sampleset):
+            best = feasible_sampleset.first
+            print("{} feasible solutions of {}.".format(len(feasible_sampleset), len(sampleset)))
+
+        selected_codon = [key for key, val in best.sample.items() if 'q' in key and val]
+        #print(selected_codon)
+        selected_codon = sorted([int(x[2:]) for x in selected_codon])
+        
+        return self.outcome_codon_seq_cqm(selected_codon, 'DNA')
+
+    
+    def outcome_codon_seq_cqm(self, selected_codon, base):
+        #flattening
+        flattening_all_possible_codons = sum(self.list_all_possible_codons, [])
+
+        if base == 'RNA':
+            res_codon_frag = [flattening_all_possible_codons[c] for c in selected_codon]
+
+        elif base == 'DNA':
+            res_codon_frag = [flattening_all_possible_codons[c].replace("U", "T") for c in selected_codon]
+
+        return res_codon_frag
+
+
+
+
 
 class Run_whole_seq(Codon_Hamiltonian):
     def __init__(self, amino_acid_seq, wp, block_size=5, verbose=0):
@@ -367,22 +475,6 @@ class Run_whole_seq(Codon_Hamiltonian):
             self.min_E_list.append(min_E)
 
 
-    def save_n_dp_outcome(self, DNA_name):
-        
-        return
-
-
-
-def load_codon_seq(name, bs, wp):
-    #bs: bloch_size
-
-    #wp: weight params
-    return
-
-
-def save_outcomes(DNA_name, bs, wp):
-
-    return
 
 
 
@@ -436,21 +528,6 @@ class Quantum_Ising():
             self.ground_state = eigenvec[:,0]
         else:
             self.ground_state = eigenvec[:,:degeneracy+1].transpose()
-
-
-    def outcome_codon_seq(self, ):
-        
-
-        #flattening
-        flattening_all_possible_codons = sum(self.list_all_possible_codons, [])
-
-        if base == 'RNA':
-            res_codon_frag = [flattening_all_possible_codons[i] for i in min_sample]
-
-        elif base == 'DNA':
-            res_codon_frag = [flattening_all_possible_codons[i].replace("U", "T") for i in min_sample]
-
-        return res_codon_frag
 
 
     def get_outcome(self, types='braket'):
@@ -511,14 +588,6 @@ def vec_to_braket(vec, types='bracket'):
         res = [i for i,val in enumerate(res_binary) if val=='1']
 
     return res
-
-
-
-
-
-
-
-
 
 
 
@@ -592,9 +661,6 @@ class CAIs():
         }
 
 
-
-
-    
     def check_basis(self, codon_seq):
         try:
             codon_seq.index("T")
@@ -611,3 +677,119 @@ def GC_average(codons):
         return [GC(c) for c in codons]
     else:
         return GC(codons)
+
+
+def similarity(a, b):
+    if len(a) != len(b):
+        raise ValueError('the lenghts of sequence a and b are not the same!')
+
+    size = len(a)
+    count = 0 # A counter to keep track of same characters
+
+    for i in range(size):
+        if a[i] == b[i]:
+            count += 1 # Updating the counter when characters are same at an index
+
+    #print("Number of Same Characters:", count)
+    return count / size
+
+
+def eff_N_c(codon_seq):
+    translated_aa_seq = Counter(Seq(codon_seq).translate())
+    codon_seq = [codon_seq[i:i+3] for i in range(0, len(codon_seq), 3)] # Splitting by 3 characters (i.e., by a codon)
+
+
+    degen_list = {1:[], 2:[], 3:[], 4:[], 6:[]} # list of amino acids that have the same degeneracy
+    F_list = {} # list of homozygosities(F) organized by degen_list
+    for key, var in translated_aa_seq.items():
+        #print(key, ':', var)
+        p_i_square=[]
+        for i in Amino_acid_to_Codon(key).in_dna_base()[0]:  
+            #print(i, ':', 'p_i =',Counter(seq)[i])
+            p_i = Counter(codon_seq)[i] / var
+            p_i_square.append(p_i**2)
+        
+        #print('sum p_i_square:',sum(p_i_square))
+        #print('n * sum p_i_square:',var*sum(p_i_square))
+        F = (var*sum(p_i_square)-1)/(var-1)
+        #print('F', F)
+
+        F_list[key] = F
+        degen_list[len(Amino_acid_to_Codon(key).in_dna_base()[0])].append(key) 
+
+    # F_avg for the same degen aa
+    F_avg_list = {}
+    for key, val in degen_list.items():
+        F_avg_list[len(val)] = sum([F_list[aa] for aa in val])/len(val)
+
+    res = 0
+    for key, val in F_avg_list.items():
+        res += key / val
+
+    return res
+
+
+def GC3(codon_seq):
+    nclt3_in_codon = [codon_seq[3*i+2] for i in range(len(codon_seq)//3)]
+    GC_count_in3rd = nclt3_in_codon.count('G') + nclt3_in_codon.count('C')
+    
+    return 100 * GC_count_in3rd / (len(codon_seq)//3) #percentage
+
+
+def CPB(codon_seq, host):
+    res = 0
+    for n in range(len(codon_seq)//3 -1):
+        codon_pair = codon_seq[3*n:3*(n+1)] + codon_seq[3*(n+1):3*(n+2)]
+        pcpt = pd.read_csv('./CPS_'+host+'.csv')
+        res += pcpt[pcpt['CodonPair'] == codon_pair]['CPS'].values[0]
+
+    return res / (len(codon_seq)//3 -1)
+
+
+def getGCDistribution(sequence : str, window=30) -> list : 
+    seq_chunks = [sequence[i:i+window] for i in range(len(sequence)-window)]
+    assert len(seq_chunks) == len(sequence) - window
+    GC_li = []
+    for seqC in seq_chunks:
+        GC_li.append(GC(seqC))
+    
+    return GC_li
+
+
+
+def dp_metrics(name, codon_seq, **kargs):
+    window = kargs['window'] if 'window' in kargs.keys() else 30
+
+    CAI_hu = CAIs("human")
+    CAI_ec = CAIs("ecoli")
+
+    
+    print(name)
+    print("-"*40)
+    print(f"CAI for human: {CAI_hu(codon_seq)}")
+    print(f"CAI for ecoli: {CAI_ec(codon_seq)}")
+    print(f"CPB for human: {CPB(codon_seq,'human')}")
+    print(f"CPB for ecoli: {CPB(codon_seq,'ecoli')}")
+    print(f"Effective number of codons: {eff_N_c(codon_seq)}")
+    if 'ref_codon' in kargs.keys():
+        print(f"Similarity to ref_codon: {similarity(codon_seq, kargs['ref_codon'])}")
+    print(f"GC: {GC(codon_seq)}")
+    print(f"GC3: {GC3(codon_seq)}")
+    
+
+
+    GCd_ref = getGCDistribution(codon_seq, window) 
+
+    plt.figure(figsize=(10,5))
+    plt.ylabel("GC Content", fontsize=15)
+    plt.xlabel("Position", fontsize=15)
+    plt.xticks(fontsize=13)
+    plt.yticks(fontsize=13)
+    plt.ylim([0,100])
+    plt.hlines(y=30,xmin=0,xmax=len(GCd_ref), color='r', linestyles='--')
+    plt.hlines(y=70,xmin=0,xmax=len(GCd_ref), color='r', linestyles='--')
+
+    plt.plot(np.arange(len(GCd_ref)), GCd_ref)
+    plt.title('GC content of Reference codon')
+
+    plt.show()
