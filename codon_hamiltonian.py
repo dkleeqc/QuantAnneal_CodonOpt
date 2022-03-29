@@ -135,7 +135,8 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
 
 
     "codon_usage_frequency"
-    def vec_zeta(self, host='e_coli_316407', epsilon_f=0):
+    def vec_zeta(self, host='e_coli', epsilon_f=0):
+        host = list(filter(lambda x: host in x, pct.available_codon_tables_names))[-1]
         codon_table = pct.get_codons_table(host)
         codon_seq_in_dna_base = self.in_dna_base()
 
@@ -145,7 +146,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         return np.log(flattening_codon_freq)
 
 
-    def matrix_CPS(self, host='ecoli'):
+    def matrix_CPS(self, host='e_coli'):
         matrix = np.zeros((self.N, self.N))
 
         codon_list = self.in_dna_base()
@@ -215,7 +216,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
 
 
     def _cps(self, codon_pair, host):
-        pcpt = pd.read_csv('./CodonPair_jhlee/CPS_'+host+'.csv')
+        pcpt = pd.read_csv('./CPS_'+host+'.csv')
         return pcpt[pcpt['CodonPair'] == codon_pair]['CPS'].values[0]
 
 
@@ -345,7 +346,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         
 
     "---------- CQM with LeapHybridCQMSolver ----------"
-    def H_cqm(self, weight_params=None):
+    def H_cqm(self, weight_params=None, host1='e_coli', host2='h_sapiens'):
         cqm = ConstrainedQuadraticModel()
         wp = self.wp if weight_params==None else weight_params
         #weight_params = {'c_f': 0.01, 'c_GC': 10, 'c_R': 0.01, 'rho_T': 0.6}
@@ -353,19 +354,19 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         # Objective
         # 1. codon usage bias
         var_q = [Binary(f'q_{i}') for i in range(self.N)]
-        cub_ec_obj = sum((-1) * self.vec_zeta(host='e_coli_316407') * var_q)
-        cub_hu_obj = sum((-1) * self.vec_zeta(host='h_sapiens_9606') * var_q)
+        cub_h1_obj = sum((-1) * self.vec_zeta(host1) * var_q)
+        cub_h2_obj = sum((-1) * self.vec_zeta(host2) * var_q)
 
         # 2. codon pair usage bias
-        mat_ec = self.matrix_CPS(host='ecoli')
-        mat_hu = self.matrix_CPS(host='human')
-        nonzeros = np.argwhere(mat_ec)
-        cpub_ec_obj = 0
-        cpub_hu_obj = 0
+        mat_h1 = self.matrix_CPS(host1)
+        mat_h2 = self.matrix_CPS(host2)
+        nonzeros = np.argwhere(mat_h1)
+        cpub_h1_obj = 0
+        cpub_h2_obj = 0
         for pos in nonzeros:
             i,j = pos
-            cpub_ec_obj -= mat_ec[i,j] * var_q[i] * var_q[j]
-            cpub_hu_obj -= mat_hu[i,j] * var_q[i] * var_q[j]
+            cpub_h1_obj -= mat_h1[i,j] * var_q[i] * var_q[j]
+            cpub_h2_obj -= mat_h2[i,j] * var_q[i] * var_q[j]
 
         # 3. repeated nucleotide sequence
         R = self.matrix_R()
@@ -375,8 +376,8 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
             i,j = pos
             rep_nuc_obj += R[i,j] * var_q[i] * var_q[j]
 
-        cqm.set_objective(wp['cub_ec']*cub_ec_obj + wp['cub_hu']*cub_hu_obj \
-                    + wp['cpub_ec']*cpub_ec_obj + wp['cpub_hu']*cpub_hu_obj + wp['rep_nuc']*rep_nuc_obj)
+        cqm.set_objective(wp['cub_h1']*cub_h1_obj + wp['cub_h2']*cub_h2_obj \
+                    + wp['cpub_h1']*cpub_h1_obj + wp['cpub_h2']*cpub_h2_obj + wp['rep_nuc']*rep_nuc_obj)
 
         # Constraint 1
         N_accumulated = 0
@@ -407,7 +408,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         return cqm
 
 
-    def run_Hybrid(self, base='RNA'):
+    def run_Hybrid(self, host1, host2, base='DNA'):
         sampler = LeapHybridCQMSampler()
         cqm = self.H_cqm()
 
@@ -423,7 +424,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         #print(selected_codon)
         selected_codon = sorted([int(x[2:]) for x in selected_codon])
         
-        return self.outcome_codon_seq_cqm(selected_codon, 'DNA')
+        return self.outcome_codon_seq_cqm(selected_codon, base)
 
     
     def outcome_codon_seq_cqm(self, selected_codon, base):
@@ -768,8 +769,8 @@ def dp_metrics(name, codon_seq, **kargs):
     print("-"*40)
     print(f"CAI for human: {CAI_hu(codon_seq)}")
     print(f"CAI for ecoli: {CAI_ec(codon_seq)}")
-    print(f"CPB for human: {CPB(codon_seq,'human')}")
-    print(f"CPB for ecoli: {CPB(codon_seq,'ecoli')}")
+    print(f"CPB for human: {CPB(codon_seq,'h_sapiens')}")
+    print(f"CPB for ecoli: {CPB(codon_seq,'e_coli')}")
     print(f"Effective number of codons: {eff_N_c(codon_seq)}")
     if 'ref_codon' in kargs.keys():
         print(f"Similarity to ref_codon: {similarity(codon_seq, kargs['ref_codon'])}")
