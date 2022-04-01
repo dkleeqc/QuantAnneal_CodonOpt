@@ -26,6 +26,17 @@ from dwave.system.composites import EmbeddingComposite
 from dwave.system import LeapHybridCQMSampler
 from dimod import Binary, ConstrainedQuadraticModel
 
+import time
+
+def logging_time(original_fn):
+    def wrapper_fn(*args, **kwargs):
+        start_time = time.time()
+        result = original_fn(*args, **kwargs)
+        end_time = time.time()
+        print("WorkingTime[{}]: {} sec".format(original_fn.__name__, end_time-start_time))
+        return result
+    return wrapper_fn
+
 
 
 class Amino_acid_to_Codon():
@@ -145,8 +156,9 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         flattening_codon_freq = np.array(_to_list(self.codon_freq))
         return np.log(flattening_codon_freq)
 
-
+    #@logging_time
     def matrix_CPS(self, host='e_coli'):
+        self.get_cps_ref_dict(host=host)
         matrix = np.zeros((self.N, self.N))
 
         codon_list = self.in_dna_base()
@@ -158,7 +170,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
                     #print(codon_list[x][a], codon_list[x+1][b])
                     #print(position_i+a, position_j+b)
                     codon_pair = codon_list[x][a] + codon_list[x+1][b]
-                    matrix[position_i+a, position_j+b] = self._cps(codon_pair, host)
+                    matrix[position_i+a, position_j+b] = self._cps(codon_pair)
             
             position_i += len(codon_list[x])
             position_j += len(codon_list[x+1])
@@ -185,6 +197,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
 
 
     # minimizing_sequentially_repeated_nucleotides_term
+    #@logging_time
     def matrix_R(self):
         Rmatrix = np.zeros((self.N, self.N))
 
@@ -214,10 +227,16 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
             t += l
         return np.triu(tau - np.diag(np.diag(tau)))
 
+    def get_cps_ref_dict(self, host):
+        pcpt_df = pd.read_csv('./CPS_'+host+'.csv')
+        self.pcpt_dict = pcpt_df.set_index(["CodonPair"], drop=True).to_dict()["CPS"]
+        
 
-    def _cps(self, codon_pair, host):
-        pcpt = pd.read_csv('./CPS_'+host+'.csv')
-        return pcpt[pcpt['CodonPair'] == codon_pair]['CPS'].values[0]
+    def _cps(self, codon_pair):
+        # pcpt = pd.read_csv('./CPS_'+host+'.csv')
+        # return pcpt[pcpt['CodonPair'] == codon_pair]['CPS'].values[0]
+        _cps = self.pcpt_dict[codon_pair]
+        return _cps
 
 
     def _repeated_sequential_nucleotides(self, Ci, Cj):
@@ -346,6 +365,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         
 
     "---------- CQM with LeapHybridCQMSolver ----------"
+    #@logging_time
     def H_cqm(self, weight_params=None, host1='e_coli', host2='h_sapiens'):
         cqm = ConstrainedQuadraticModel()
         wp = self.wp if weight_params==None else weight_params
@@ -598,7 +618,7 @@ def vec_to_braket(vec, types='bracket'):
 
 
 class CAIs():
-    def __init__(self, organ="ecoli"):
+    def __init__(self, organ="e_coli"):
         self.organ = organ
         self.rscu_organ = self.get_RSCU_from_ctable()
 
@@ -609,10 +629,15 @@ class CAIs():
 
 
     def getFlatPct(self):
-        if self.organ == "ecoli":
+        """
+        if self.organ == "e_coli":
             table = pct.get_codons_table("e_coli_316407")
         elif self.organ == "human":
             table = pct.get_codons_table("h_sapiens_9606")
+        """
+        self.organ = list(filter(lambda x: self.organ in x, pct.available_codon_tables_names))[-1]
+        table = pct.get_codons_table(self.organ)
+
 
         tableForCAI={}
         for key in table.keys():
@@ -758,26 +783,31 @@ def getGCDistribution(sequence : str, window=30) -> list :
 
 
 
-def dp_metrics(name, codon_seq, **kargs):
+def dp_metrics(name, codon_seq, hosts, **kargs):
     window = kargs['window'] if 'window' in kargs.keys() else 30
 
-    CAI_hu = CAIs("human")
-    CAI_ec = CAIs("ecoli")
+    if 'weight_params' in kargs.keys():
+        wp = kargs['weight_params']
+        df1 = pd.DataFrame(wp.values(), 
+                            index = [['DNA name: '+name]*len(wp),list(wp.keys())], 
+                            columns = ['Weights']).T
+        display(df1)
 
     
-    print(name)
-    print("-"*40)
-    print(f"CAI for human: {CAI_hu(codon_seq)}")
-    print(f"CAI for ecoli: {CAI_ec(codon_seq)}")
-    print(f"CPB for human: {CPB(codon_seq,'h_sapiens')}")
-    print(f"CPB for ecoli: {CPB(codon_seq,'e_coli')}")
-    print(f"Effective number of codons: {eff_N_c(codon_seq)}")
-    if 'ref_codon' in kargs.keys():
-        print(f"Similarity to ref_codon: {similarity(codon_seq, kargs['ref_codon'])}")
-    print(f"GC: {GC(codon_seq)}")
-    print(f"GC3: {GC3(codon_seq)}")
-    
+    sim = similarity(codon_seq, kargs['ref_codon']) if 'ref_codon' in kargs.keys() else 'N/A'
+    df2 = pd.DataFrame([sim, eff_N_c(codon_seq), GC(codon_seq), GC3(codon_seq)], 
+                    index = ['Similarity to ref_codon', 'Effective number of codons', 'GC', 'GC3'],
+                    columns = ['Optimal Codon Seq']
+                    )
+    display(df2)
 
+
+    CAI_list = [CAIs(h)(codon_seq) for h in hosts]
+    CPB_list = [CPB(codon_seq, h) for h in hosts]
+    cu_table = np.array([CAI_list, CPB_list])
+    df3 = pd.DataFrame(cu_table, index = ['CAI','CPB'], columns = hosts)
+    display(df3)
+    
 
     GCd_ref = getGCDistribution(codon_seq, window) 
 
