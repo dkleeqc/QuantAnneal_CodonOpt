@@ -131,6 +131,24 @@ class Amino_acid_to_Codon():
 def fragmenting_amino_acid_seq(Amino_acid_seq, length_frag, ith):
     return Amino_acid_seq[length_frag * (ith):length_frag * (ith+1)]
 
+def codon_usage_table(host = 'sars_cov2'):
+    # Load codon usage bias table from CoCoPUTs
+    df = pd.read_csv("./CUT_"+host+".csv")
+
+    tables = pct.get_codons_table("e_coli_316407")
+
+    for k, v in tables.items():
+        for c in v.keys():
+            #print(c, tables[k][c])
+            tables[k][c] = df.loc[df['Codon'] == c].iat[0,1]
+
+        tot = sum(list(v.values()))
+        for c in v.keys():
+            #print(c, tables[k][c])
+            tables[k][c] = tables[k][c]/ tot
+
+    return tables
+
 
 
 
@@ -147,9 +165,15 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
 
     "codon_usage_frequency"
     def vec_zeta(self, host='e_coli', epsilon_f=0):
-        host = list(filter(lambda x: host in x, pct.available_codon_tables_names))[-1]
-        codon_table = pct.get_codons_table(host)
+        
+        if host == 'sars_cov2':
+            codon_table = codon_usage_table(host)
+        else:
+            host = list(filter(lambda x: host in x, pct.available_codon_tables_names))[-1]
+            codon_table = pct.get_codons_table(host)
+        
         codon_seq_in_dna_base = self.in_dna_base()
+        #print(codon_seq_in_dna_base)
 
         self.codon_freq = [[codon_table[self.amino_acid_seq[aa]][c] + epsilon_f for c in codon_seq_in_dna_base[aa]] for aa in range(self.len_aa_seq)]
 
@@ -366,7 +390,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
 
     "---------- CQM with LeapHybridCQMSolver ----------"
     #@logging_time
-    def H_cqm(self, weight_params=None, host1='e_coli', host2='h_sapiens'):
+    def H_cqm(self, host1='e_coli', host2='h_sapiens', weight_params=None):
         cqm = ConstrainedQuadraticModel()
         wp = self.wp if weight_params==None else weight_params
         #weight_params = {'c_f': 0.01, 'c_GC': 10, 'c_R': 0.01, 'rho_T': 0.6}
@@ -378,6 +402,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         cub_h2_obj = sum((-1) * self.vec_zeta(host2) * var_q)
 
         # 2. codon pair usage bias
+        #print(host1, host2)
         mat_h1 = self.matrix_CPS(host1)
         mat_h2 = self.matrix_CPS(host2)
         nonzeros = np.argwhere(mat_h1)
@@ -428,12 +453,13 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         return cqm
 
 
-    def run_Hybrid(self, host1, host2, base='DNA'):
+    def run_Hybrid(self, host1, host2, base='DNA', **kwargs):
         sampler = LeapHybridCQMSampler()
-        cqm = self.H_cqm()
+        cqm = self.H_cqm(host1=host1, host2=host2)
 
         sampleset = sampler.sample_cqm(cqm,
                                 #time_limit=20,    
+                                #chain_strength = 1000,
                                 label="Codon CQM")
         feasible_sampleset = sampleset.filter(lambda row: row.is_feasible)
         if len(feasible_sampleset):
@@ -443,8 +469,11 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         selected_codon = [key for key, val in best.sample.items() if 'q' in key and val]
         #print(selected_codon)
         selected_codon = sorted([int(x[2:]) for x in selected_codon])
-        
-        return self.outcome_codon_seq_cqm(selected_codon, base)
+
+        if kwargs['sampleset']==True:
+            return self.outcome_codon_seq_cqm(selected_codon, base), feasible_sampleset
+        else:
+            return self.outcome_codon_seq_cqm(selected_codon, base)
 
     
     def outcome_codon_seq_cqm(self, selected_codon, base):
@@ -629,15 +658,11 @@ class CAIs():
 
 
     def getFlatPct(self):
-        """
-        if self.organ == "e_coli":
-            table = pct.get_codons_table("e_coli_316407")
-        elif self.organ == "human":
-            table = pct.get_codons_table("h_sapiens_9606")
-        """
-        self.organ = list(filter(lambda x: self.organ in x, pct.available_codon_tables_names))[-1]
-        table = pct.get_codons_table(self.organ)
-
+        if self.organ == 'sars_cov2':
+            table = codon_usage_table(self.organ)
+        else:
+            host = list(filter(lambda x: self.organ in x, pct.available_codon_tables_names))[-1]
+            table = pct.get_codons_table(host)
 
         tableForCAI={}
         for key in table.keys():
@@ -737,7 +762,7 @@ def eff_N_c(codon_seq):
         
         #print('sum p_i_square:',sum(p_i_square))
         #print('n * sum p_i_square:',var*sum(p_i_square))
-        F = (var*sum(p_i_square)-1)/(var-1)
+        F = (var*sum(p_i_square)-1)/(var-1) if var != 1 else 1
         #print('F', F)
 
         F_list[key] = F
@@ -750,19 +775,19 @@ def eff_N_c(codon_seq):
 
     res = 0
     for key, val in F_avg_list.items():
-        res += key / val
+        res += key / val if val != 0 else 0
 
     return res
 
 
-def GC3(codon_seq):
+def GC3(codon_seq:str):
     nclt3_in_codon = [codon_seq[3*i+2] for i in range(len(codon_seq)//3)]
     GC_count_in3rd = nclt3_in_codon.count('G') + nclt3_in_codon.count('C')
     
     return 100 * GC_count_in3rd / (len(codon_seq)//3) #percentage
 
 
-def CPB(codon_seq, host):
+def CPB(codon_seq:str, host:str):
     res = 0
     for n in range(len(codon_seq)//3 -1):
         codon_pair = codon_seq[3*n:3*(n+1)] + codon_seq[3*(n+1):3*(n+2)]
@@ -811,7 +836,7 @@ def dp_metrics(name, codon_seq, hosts, **kargs):
 
     GCd_ref = getGCDistribution(codon_seq, window) 
 
-    plt.figure(figsize=(10,5))
+    plt.figure(figsize=(8,4))
     plt.ylabel("GC Content", fontsize=15)
     plt.xlabel("Position", fontsize=15)
     plt.xticks(fontsize=13)
@@ -821,6 +846,6 @@ def dp_metrics(name, codon_seq, hosts, **kargs):
     plt.hlines(y=70,xmin=0,xmax=len(GCd_ref), color='r', linestyles='--')
 
     plt.plot(np.arange(len(GCd_ref)), GCd_ref)
-    plt.title('GC content of Reference codon')
+    plt.title('GC content of '+name)
 
     plt.show()
