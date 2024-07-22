@@ -252,7 +252,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         return np.triu(tau - np.diag(np.diag(tau)))
 
     def get_cps_ref_dict(self, host):
-        pcpt_df = pd.read_csv('./CPS_'+host+'.csv')
+        pcpt_df = pd.read_csv('./codon_table/CPS_'+host+'.csv')
         self.pcpt_dict = pcpt_df.set_index(["CodonPair"], drop=True).to_dict()["CPS"]
         
 
@@ -791,7 +791,7 @@ def CPB(codon_seq:str, host:str):
     res = 0
     for n in range(len(codon_seq)//3 -1):
         codon_pair = codon_seq[3*n:3*(n+1)] + codon_seq[3*(n+1):3*(n+2)]
-        pcpt = pd.read_csv('./CPS_'+host+'.csv')
+        pcpt = pd.read_csv('./codon_table/CPS_'+host+'.csv')
         res += pcpt[pcpt['CodonPair'] == codon_pair]['CPS'].values[0]
 
     return res / (len(codon_seq)//3 -1)
