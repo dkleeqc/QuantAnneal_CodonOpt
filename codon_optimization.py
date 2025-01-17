@@ -1,5 +1,6 @@
 import functools
 import os
+import copy
 from itertools import groupby
 import operator
 from collections import defaultdict, Counter
@@ -127,28 +128,28 @@ class Amino_acid_to_Codon():
 
 
 
-
 def fragmenting_amino_acid_seq(Amino_acid_seq, length_frag, ith):
     return Amino_acid_seq[length_frag * (ith):length_frag * (ith+1)]
 
+
 def codon_usage_table(host = 'sars_cov2'):
     # Load codon usage bias table from CoCoPUTs
-    df = pd.read_csv("./CUT_"+host+".csv")
+    df = pd.read_csv("./codon_table/CUT_"+host+".csv")
 
     tables = pct.get_codons_table("e_coli_316407")
+    new_tables = copy.deepcopy(tables)
 
     for k, v in tables.items():
         for c in v.keys():
-            #print(c, tables[k][c])
-            tables[k][c] = df.loc[df['Codon'] == c].iat[0,1]
+            new_tables[k][c] = df.loc[df['Codon'] == c].iat[0,1]
+            #print(c, new_tables[k][c])
 
         tot = sum(list(v.values()))
         for c in v.keys():
-            #print(c, tables[k][c])
-            tables[k][c] = tables[k][c]/ tot
+            new_tables[k][c] = new_tables[k][c]/ tot
+            #print(c, new_tables[k][c])
 
-    return tables
-
+    return new_tables
 
 
 
@@ -164,13 +165,13 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
 
 
     "codon_usage_frequency"
-    def vec_zeta(self, host='e_coli', epsilon_f=0):
+    def vec_zeta(self, host='e_coli', epsilon_f=0, pct_use=False):
         
-        if host == 'sars_cov2':
-            codon_table = codon_usage_table(host)
-        else:
+        if pct_use:
             host = list(filter(lambda x: host in x, pct.available_codon_tables_names))[-1]
             codon_table = pct.get_codons_table(host)
+        else:
+           codon_table = codon_usage_table(host)
         
         codon_seq_in_dna_base = self.in_dna_base()
         #print(codon_seq_in_dna_base)
@@ -390,7 +391,7 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
 
     "---------- CQM with LeapHybridCQMSolver ----------"
     #@logging_time
-    def H_cqm(self, host1='e_coli', host2='h_sapiens', weight_params=None):
+    def H_cqm(self, host='e_coli', original='h_sapiens', weight_params=None):
         cqm = ConstrainedQuadraticModel()
         wp = self.wp if weight_params==None else weight_params
         #weight_params = {'c_f': 0.01, 'c_GC': 10, 'c_R': 0.01, 'rho_T': 0.6}
@@ -398,13 +399,13 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         # Objective
         # 1. codon usage bias
         var_q = [Binary(f'q_{i}') for i in range(self.N)]
-        cub_h1_obj = sum((-1) * self.vec_zeta(host1) * var_q)
-        cub_h2_obj = sum((-1) * self.vec_zeta(host2) * var_q)
+        cub_h1_obj = sum((-1) * self.vec_zeta(host) * var_q)
+        cub_h2_obj = sum((-1) * self.vec_zeta(original) * var_q)
 
         # 2. codon pair usage bias
-        #print(host1, host2)
-        mat_h1 = self.matrix_CPS(host1)
-        mat_h2 = self.matrix_CPS(host2)
+        #print(host, original)
+        mat_h1 = self.matrix_CPS(host)
+        mat_h2 = self.matrix_CPS(original)
         nonzeros = np.argwhere(mat_h1)
         cpub_h1_obj = 0
         cpub_h2_obj = 0
@@ -453,9 +454,9 @@ class Codon_Hamiltonian(Amino_acid_to_Codon):
         return cqm
 
 
-    def run_Hybrid(self, host1, host2, base='DNA', **kwargs):
+    def run_Hybrid(self, host, original, base='DNA', **kwargs):
         sampler = LeapHybridCQMSampler()
-        cqm = self.H_cqm(host1=host1, host2=host2)
+        cqm = self.H_cqm(host=host, original=original)
 
         sampleset = sampler.sample_cqm(cqm,
                                 #time_limit=20,    
@@ -808,7 +809,7 @@ def getGCDistribution(sequence : str, window=30) -> list :
 
 
 
-def dp_metrics(name, codon_seq, hosts, **kargs):
+def dp_metrics(name, codon_seq, organisms, **kargs):
     window = kargs['window'] if 'window' in kargs.keys() else 30
 
     if 'weight_params' in kargs.keys():
@@ -827,10 +828,10 @@ def dp_metrics(name, codon_seq, hosts, **kargs):
     display(df2)
 
 
-    CAI_list = [CAIs(h)(codon_seq) for h in hosts]
-    CPB_list = [CPB(codon_seq, h) for h in hosts]
+    CAI_list = [CAIs(h)(codon_seq) for h in organisms]
+    CPB_list = [CPB(codon_seq, h) for h in organisms]
     cu_table = np.array([CAI_list, CPB_list])
-    df3 = pd.DataFrame(cu_table, index = ['CAI','CPB'], columns = hosts)
+    df3 = pd.DataFrame(cu_table, index = ['CAI','CPB'], columns = organisms)
     display(df3)
     
 
