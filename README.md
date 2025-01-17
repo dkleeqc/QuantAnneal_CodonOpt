@@ -12,4 +12,6 @@ Contribution: Dongkeun Lee, Jaehee Kim, Junho Lee
 
 * `run_codon_optimization.ipynb` : Running `codon_optimization.py` to solve codon optimization problems using D-Wave LeapCQMHybridSolver
 
-* `codon_table`: Codon Usage Table and Codon Pair Usage Tables obtained from COCOPUTs [[Link]](https://dnahive.fda.gov/dna.cgi?cmd=cuts_main)
+* `results_codon_optimization.ipynb` : Simulation results from `codon_optimization.py`
+
+* `codon_table`: Datasets about Codon Usage Table and Codon Pair Usage Table obtained from COCOPUTs [[Link]](https://dnahive.fda.gov/dna.cgi?cmd=cuts_main)
